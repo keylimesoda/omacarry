@@ -12,6 +12,7 @@ root = Path(__file__).resolve().parent.parent
 launcher = root / 'bin' / 'omacarry'
 if not launcher.is_file():
     parser.error(f'launcher not found: {launcher}')
+subprocess.run([str(root / 'bin' / 'build')], check=True)
 # Desktop Entry Exec quoting is not shell quoting. Escape reserved characters
 # inside a double-quoted argument and escape percent field codes.
 quoted = str(launcher).replace('%', '%%').replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$')

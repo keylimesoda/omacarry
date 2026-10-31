@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -296,8 +297,13 @@ def main(argv=None) -> int:
         return 0 if all(res.ok for res in results) else 1
 
     if args.cmd == "gui":
-        from .gui import run as run_gui
-        return run_gui(sys.argv[:1])
+        root = Path(__file__).resolve().parent.parent
+        binary = root / "build" / "omacarry-gui"
+        if not binary.is_file():
+            print("Qt interface is not built; run ./bin/build first", file=sys.stderr)
+            return 1
+        os.environ["OMACARRY_ROOT"] = str(root)
+        os.execv(str(binary), [str(binary)])
 
     return 2
 
