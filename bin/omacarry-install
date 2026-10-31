@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install Om Carry's menu entry and optional post-update hook."""
+"""Install omacarry's menu entry and optional post-update hook."""
 import argparse
 import os
 import subprocess
@@ -19,7 +19,7 @@ quoted = str(launcher).replace('%', '%%').replace('\\', '\\\\').replace('"', '\\
 applications = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share') / 'applications'
 applications.mkdir(parents=True, exist_ok=True)
 entry = applications / 'omacarry.desktop'
-entry.write_text('[Desktop Entry]\nType=Application\nName=Om Carry\n'
+entry.write_text('[Desktop Entry]\nType=Application\nName=omacarry\n'
                  'Comment=Keep Omarchy plugin changes current\n'
                  f'Exec="{quoted}" gui\nIcon=system-software-update\n'
                  'Terminal=false\nCategories=Settings;\n')

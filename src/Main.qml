@@ -6,7 +6,7 @@ import QtQuick.Layouts
 ApplicationWindow {
     id: win
     width: 1000; height: 760; minimumWidth: 680; minimumHeight: 500
-    visible: true; title: qsTr("Om Carry"); color: "#101012"
+    visible: true; title: qsTr("omacarry"); color: "#101012"
     Material.theme: Material.Dark
     Material.accent: theme.accent
     Material.roundedScale: theme.radius
@@ -73,7 +73,7 @@ ApplicationWindow {
             LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
             LayoutMirroring.childrenInherit: true
             anchors.fill: parent; anchors.leftMargin: 20; anchors.rightMargin: 20
-            Label { text: qsTr("OM CARRY"); font.bold: true; font.pixelSize: 15; font.letterSpacing: 1.2; color: theme.accent }
+            Label { text: qsTr("OMACARRY"); font.bold: true; font.pixelSize: 15; font.letterSpacing: 1.2; color: theme.accent }
             Item { Layout.fillWidth: true }
             BusyIndicator { running: backend.busy; visible: running; implicitWidth: 30; implicitHeight: 30 }
             ToolButton { text: qsTr("Refresh"); onClicked: refresh() }

@@ -1,6 +1,6 @@
 <div align="center">
 
-# Om Carry
+# omacarry
 
 **Your changes. Upstream updates. Both, together.**
 
@@ -11,7 +11,7 @@
 
 Keep your Omarchy shell plugins up to date while carrying your own changes.
 
-![Om Carry showing three example plugins and their sync status](assets/overview.png)
+![omacarry showing three example plugins and their sync status](assets/overview.png)
 
 *Screenshots use fictional plugins and repositories.*
 
@@ -24,7 +24,7 @@ the change on a personal GitHub branch. Meanwhile, the plugin's upstream keeps
 moving. You want the new fixes and features **and** your own change in the app
 on your desktop.
 
-Om Carry keeps the branches together. When you run an Omarchy update, it checks
+omacarry keeps the branches together. When you run an Omarchy update, it checks
 the upstream project, brings its changes into your GitHub branch, and installs
 the resulting branch locally. Your change travels along with the updates.
 
@@ -66,7 +66,7 @@ cd ~/Work/omacarry
 ./bin/omacarry-install
 ```
 
-Open **Om Carry** from your app launcher. Expand a plugin to select its PR or
+Open **omacarry** from your app launcher. Expand a plugin to select its PR or
 choose **Track branch**. Automatic sync can be enabled or paused per plugin.
 
 The installer adds a launcher and registers an Omarchy post-update hook. Both
@@ -83,7 +83,7 @@ can also open the app directly with `./bin/omacarry gui`.
 3. Push the updated GitHub branch with a lease. If that succeeds, update and
    install the local plugin and ask the shell to rescan it.
 
-Om Carry stops when it needs your help—for example, if a replay conflicts, the
+omacarry stops when it needs your help—for example, if a replay conflicts, the
 local checkout contains unpublished work, or the remote branch changes during
 the push. If GitHub updates but local installation fails, the result says so.
 The hook runs when a confirmed `omarchy update` reaches its post-update step; it
