@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import core  # noqa: E402
+from . import agent, core, prsync  # noqa: E402
 
 STATE_LABEL = {
     "stock": "In sync",
@@ -44,6 +44,7 @@ STATE_CLASS = {
 }
 CSS = b"""
 .summary { font-family: monospace; }
+.plugin-status { border-radius: 999px; padding: 4px 10px; font-weight: 600; background: alpha(currentColor, 0.10); }
 """
 
 
@@ -83,10 +84,9 @@ class CarryWindow(Adw.ApplicationWindow):
         header.pack_end(self.spinner)
         header.pack_end(self.show_sync)
         header.pack_end(sync_label)
-        self.auto_button = Gtk.Button(label="Auto pass", valign=Gtk.Align.CENTER)
+        self.auto_button = Gtk.Button(label="Sync all", valign=Gtk.Align.CENTER)
         self.auto_button.set_tooltip_text(
-            "The post-update pass: rebase and install what is predicted clean, let "
-            "Omarchy's updater take plugins with no delta of yours, notify the rest")
+            "Sync enabled PR branches and install their updates")
         header.pack_end(self.auto_button)
         hook_button = Gtk.Button(label="Hook", valign=Gtk.Align.CENTER)
         hook_button.set_tooltip_text("Run the auto pass automatically after every omarchy update")
@@ -174,8 +174,8 @@ class CarryWindow(Adw.ApplicationWindow):
             "Run the auto pass after every Omarchy update?",
             "Writes omacarry's post-update hook into "
             "~/.config/omarchy/hooks/post-update.d/, naming the launcher it was installed from. "
-            "Predicted-clean replays get rebaselined and installed on their own; conflicts notify "
-            "you instead.",
+            "Open PR branches are updated on GitHub first, then installed locally. "
+            "Conflicts and other errors need your attention.",
             "Install hook",
             lambda: self.run("hook", core.install_hook))
 
@@ -247,190 +247,205 @@ class CarryWindow(Adw.ApplicationWindow):
 
 
 class PluginRow(Adw.ExpanderRow):
-    """One plugin: at most one verb, one switch, everything else behind them."""
+    """One discovered plugin, its PR selection and last sync result."""
 
     def __init__(self, window: CarryWindow, pl: core.Plugin):
         super().__init__(title=pl.id)
-        self.window = window
-        self.pid = pl.id
+        self.window, self.pid = window, pl.id
+        entry = core.plugin_state(pl.id)
         want = core.policy(pl.id)
-        verb, what, blocker = core.describe_action(pl)
-        self.strategy = (core.replay_strategy(pl.repo, pl.baseline or pl.head, pl.head)
-                         if pl.behind else "rebase")
-        upstream = pl.remotes.get(pl.upstream_remote or "", pl.upstream_ref or "unknown")
-        if pl.state in ("no-upstream", "detached", "rebasing") or blocker or ((pl.dirty or pl.untracked) and not want["carry_dirty"]):
-            status = "Needs attention"
-        elif not want["auto"]:
-            status = "Paused"
-        elif pl.state in ("stock", "merged"):
-            status = "Up to date"
+        last = entry.get("last_sync")
+        if last:
+            self.set_subtitle(last.get("message", ""))
+            label = ("Needs attention" if not last.get("ok") else
+                     "Synced" if want["auto"] else "Paused")
         else:
-            status = "Enabled"
-        summary = f"{len(pl.delta)} local commit(s) · upstream {upstream}"
-        self.set_subtitle((blocker or what) if status == "Needs attention" else summary)
-
-        chip = Gtk.Label(label=status)
-        chip.add_css_class("success" if status in ("Enabled", "Up to date") else "warning" if status == "Needs attention" else "dim-label")
+            self.set_subtitle("No sync attempted yet")
+            label = "Enabled" if want["auto"] else "Paused"
+        chip = Gtk.Label(label=label, valign=Gtk.Align.CENTER)
+        chip.add_css_class("success" if label in ("Synced", "Enabled") else "warning" if label == "Needs attention" else "dim-label")
         chip.add_css_class("caption")
+        chip.add_css_class("plugin-status")
         self.add_suffix(chip)
 
-        loop = Gtk.Switch(valign=Gtk.Align.CENTER, active=bool(want["auto"]))
-        loop.set_tooltip_text("Enable automatic updates after Omarchy updates")
-        loop.connect("state-set", self.set_in_loop)
-        self.add_suffix(loop)
-
-        if verb:
-            action = Gtk.Button(label=verb)
-            action.set_valign(Gtk.Align.CENTER)
-            action.add_css_class("suggested-action")
-            if blocker:
-                action.set_sensitive(False)
-                action.set_tooltip_text(blocker)
-            action.connect("clicked", lambda *_: self.run_verb(verb))
-            self.add_suffix(action)
-
-        headline = Adw.ActionRow(title=verb or "Nothing to do", subtitle=blocker or what)
-        self.add_row(headline)
-        self.add_row(self.works_in_row(pl))
-
-        technical = Adw.ExpanderRow(title="Technical details")
-        lines = [f"branch      {pl.branch or '(detached)'} at {pl.head[:9]}"]
-        if pl.baseline:
-            lines.append(f"baseline    {pl.baseline[:9]}")
-        lines.append(f"origin      {pl.origin_url or '-'}")
-        lines += [f"remote {name}  {url}" for name, url in pl.remotes.items() if name != "origin"]
-        shown_ref = pl.upstream_ref or "(none)"
-        lines.append(f"upstream    {shown_ref}")
-        lines.append(f"note        {pl.note}")
-        technical.add_row(mono_row(lines))
-        if pl.delta:
-            technical.add_row(mono_row(["my delta"] + [f"  {line}" for line in pl.delta]))
-        if pl.new_upstream:
-            shown = pl.new_upstream[:40]
-            technical.add_row(mono_row([f"upstream new ({pl.behind})"] + [f"  {line}" for line in shown]
-                                  + ([f"  ... {pl.behind - 40} more"] if pl.behind > 40 else [])))
-        if pl.dirty or pl.untracked:
-            technical.add_row(mono_row(["uncommitted"] + [f"  M {name}" for name in pl.dirty]
-                                  + [f"  ? {name}" for name in pl.untracked]))
-
-        self.add_row(technical)
-        extra = self.secondary_actions(pl, want)
-        if extra:
-            self.add_row(extra)
-        self.add_row(self.policy_section(pl, want))
-
-    # ------------------------------------------------------------------ verbs
-
-    def run_verb(self, verb: str) -> None:
-        if verb == "Resolve":
-            self.window.open_conflict(self.pid)
-        elif verb == "Record upstream":
-            UrlDialog(self.window, core.inspect_plugin(self.pid)).present(self.window)
-        elif verb == "Resume normal updates":
-            self.window.confirm(
-                f"Hand {self.pid} back to Omarchy?",
-                "origin becomes the real upstream project, your fork moves to the remote 'fork', "
-                "and the carry branch is deleted. Future updates come from omarchy plugin update.",
-                "Resume normal updates",
-                lambda: self.window.run("resume", lambda: core.resume(self.pid)))
+        switch = Adw.SwitchRow(title="Automatic sync", subtitle="Sync after Omarchy updates", active=bool(want["auto"]))
+        switch.connect("notify::active", lambda row, _: window.run("policy", lambda: core.set_policy(pl.id, auto=row.get_active())))
+        self.add_row(switch)
+        tracked = entry.get("tracked_branch")
+        if tracked:
+            description = (f"{tracked.get('upstream')}:{tracked.get('base')} ← "
+                           f"{tracked.get('head_repo')}:{tracked.get('head')}")
+            branch_row = Adw.ActionRow(title="Tracked GitHub branch", subtitle=description)
+            edit = Gtk.Button(label="Change", valign=Gtk.Align.CENTER)
+            edit.connect("clicked", lambda *_: TrackBranchDialog(window, pl).present(window))
+            branch_row.add_suffix(edit)
+            clear = Gtk.Button(label="Use PRs", valign=Gtk.Align.CENTER)
+            clear.connect("clicked", lambda *_: window.run("track", lambda: prsync.clear_tracked_branch(pl.id)))
+            branch_row.add_suffix(clear)
+            self.add_row(branch_row)
         else:
-            self.window.run("carry", lambda: core.carry(self.pid), then=self.after_carry)
+            self.selection = Adw.ComboRow(title="Upstream and PR branch", subtitle="Looking for open PRs…")
+            self.add_row(self.selection)
+            track_row = Adw.ActionRow(title="Personal branch", subtitle="Keep a GitHub branch updated without a PR")
+            track = Gtk.Button(label="Track branch", valign=Gtk.Align.CENTER)
+            track.connect("clicked", lambda *_: TrackBranchDialog(window, pl).present(window))
+            track_row.add_suffix(track)
+            self.add_row(track_row)
+        if not pl.upstream_ref:
+            upstream_row = Adw.ActionRow(title="Upstream repository", subtitle="Choose the project your PR targets")
+            upstream_button = Gtk.Button(label="Set upstream", valign=Gtk.Align.CENTER)
+            upstream_button.connect("clicked", lambda *_: UrlDialog(window, core.inspect_plugin(pl.id)).present(window))
+            upstream_row.add_suffix(upstream_button)
+            self.add_row(upstream_row)
+        self.choices = []
+        self.loading = True
+        if not tracked:
+            threading.Thread(target=self.load_prs, daemon=True).start()
+        sync = Adw.ActionRow(title="Sync now", subtitle="Update the GitHub branch, then install it locally")
+        button = Gtk.Button(label="Sync now", valign=Gtk.Align.CENTER)
+        button.add_css_class("suggested-action")
+        button.connect("clicked", lambda *_: window.run("sync", lambda: prsync.sync(pl.id)))
+        sync.add_suffix(button)
+        self.add_row(sync)
+        if last and not last.get("ok"):
+            details = last.get("message", "")
+            if last.get("files"):
+                details += "\nFiles: " + ", ".join(last["files"])
+            error_row = Adw.ActionRow(title="Last sync error", subtitle=details)
+            copy_button = Gtk.Button(label="Copy error", valign=Gtk.Align.CENTER)
+            copy_button.set_tooltip_text("Copy the error and diagnostic context")
+            copy_button.connect("clicked", self.copy_error)
+            error_row.add_suffix(copy_button)
+            help_button = Gtk.Button(label="Ask agent", valign=Gtk.Align.CENTER)
+            help_button.set_tooltip_text("Open your default Omarchy agent with the sync failure details")
+            help_button.connect("clicked", lambda *_: window.run("agent", lambda: agent.launch(pl.id)))
+            error_row.add_suffix(help_button)
+            self.add_row(error_row)
 
-    def after_carry(self, res) -> None:
-        """A rehearsed conflict is not a dead end: show the way through it."""
-        if res.ok or not res.files:
+    def copy_error(self, *_):
+        try:
+            prompt = agent.diagnostic_prompt(self.pid)
+            self.get_display().get_clipboard().set(prompt)
+        except (core.GitError, OSError, RuntimeError) as exc:
+            self.window.toast(f"Could not copy error: {exc}")
             return
-        pl = core.inspect_plugin(self.pid)
-        body = (f"Repository: {pl.repo}\nBranch: {pl.branch or '(detached)'}\n"
-                f"Conflicting files: {', '.join(res.files)}\n\n"
-                "Your checkout was not changed. Resolve the conflict online or ask your "
-                "Omarchy agent for help, then update the plugin again.")
-        dialog = Adw.AlertDialog(heading=f"{self.pid}: resolution instructions", body=body)
-        dialog.add_response("close", "Close")
-        dialog.present(self.window)
+        self.window.toast("Error details copied")
 
-    # ----------------------------------------------------------- detail parts
+    def load_prs(self):
+        try:
+            choices = prsync.discover_prs(self.pid)
+            GLib.idle_add(self.show_prs, choices, None)
+        except Exception as exc:
+            GLib.idle_add(self.show_prs, [], str(exc))
 
-    def set_in_loop(self, _switch, state) -> bool:
-        self.window.run("policy", lambda: core.set_policy(self.pid, auto=state))
-        return False  # let the switch move on screen; the engine write runs alongside
+    def show_prs(self, choices, error):
+        self.choices = choices
+        labels = [f"{p['upstream']}:{p['base']} ← {p['head_repo']}:{p['head']}  ·  {len(p['prs'])} PR(s)" for p in choices]
+        self.selection.set_model(Gtk.StringList.new(labels))
+        selected = core.plugin_state(self.pid).get("pr_selection")
+        if choices:
+            index = next((i for i, p in enumerate(choices) if p['key'] == selected), None)
+            self.selection.set_selected(index if index is not None else (0 if len(choices) == 1 else Gtk.INVALID_LIST_POSITION))
+            self.selection.set_subtitle("Choose a PR branch" if len(choices) > 1 and index is None else "Open pull requests")
+            self.selection.connect("notify::selected", self.select_pr)
+        else:
+            self.selection.set_subtitle(error or "No open PR found")
+            self.selection.set_sensitive(False)
+        self.loading = False
+        return False
 
-    def works_in_row(self, pl: core.Plugin) -> Adw.ActionRow:
-        row = Adw.ActionRow(title="Works in", subtitle=str(pl.repo))
-        if pl.repo != pl.path:
-            back = Gtk.Button(label="Back to the plugins dir")
-            back.set_valign(Gtk.Align.CENTER)
-            back.connect("clicked",
-                         lambda *_: self.window.run("repo", lambda: core.clear_repo(self.pid)))
-            row.add_suffix(back)
-        change = Gtk.Button(label="Use a dev checkout")
-        change.set_valign(Gtk.Align.CENTER)
-        change.set_tooltip_text("Do the rebase in your own repo; install deploys it to the plugins dir")
-        change.connect("clicked",
-                       lambda *_: RepoDialog(self.window, core.inspect_plugin(self.pid))
-                       .present(self.window))
-        row.add_suffix(change)
-        return row
+    def select_pr(self, row, _):
+        index = row.get_selected()
+        if self.loading or index >= len(self.choices):
+            return
+        entry = core.plugin_state(self.pid)
+        entry['pr_selection'] = self.choices[index]['key']
+        core.save_plugin_state(self.pid, entry)
+        row.set_subtitle("Open pull requests")
 
-    def secondary_actions(self, pl: core.Plugin, want: dict):
-        """Things you would not press on your own, so they sit one level down."""
-        row = Adw.ActionRow(title="Other actions")
-        plan = Gtk.Button(label="Plan")
-        plan.set_valign(Gtk.Align.CENTER)
-        plan.set_tooltip_text("Rehearse the replay in a throwaway worktree; change nothing")
-        plan.connect("clicked", lambda *_: self.window.run(
-            "plan", lambda: core.rebaseline(self.pid, dry_run=True)))
-        row.add_suffix(plan)
-        if pl.repo != pl.path:
-            install = Gtk.Button(label="Install")
-            install.set_valign(Gtk.Align.CENTER)
-            install.set_tooltip_text("Deploy this branch into the plugins dir, validate, rescan")
-            install.connect("clicked", lambda *_: self.window.run("install",
-                                                                  lambda: core.deploy(self.pid)))
-            row.add_suffix(install)
-        if not want["push"] and ("fork" in pl.remotes or (pl.upstream_remote
-                                                          and pl.upstream_remote != "origin")):
-            push = Gtk.Button(label="Push once")
-            push.set_valign(Gtk.Align.CENTER)
-            push.set_tooltip_text("force-with-lease this branch to my fork, this time only")
-            push.connect("clicked", lambda *_: self.window.run("push", lambda: core.push(self.pid)))
-            row.add_suffix(push)
-        return row
 
-    def policy_section(self, pl: core.Plugin, want: dict) -> Adw.ExpanderRow:
-        """The switches you set once and forget; in-the-loop lives on the row."""
-        section = Adw.ExpanderRow(title="When omarchy update runs",
-                                  subtitle="what may happen to this plugin with nobody there")
-        for key, title, subtitle in (
-            ("carry_dirty", "Carry uncommitted work",
-             "stash it, replay, restore it; a clash stays in the stash, never half-applied"),
-            ("push", "Keep my fork current",
-             "force-with-lease this branch to my fork after a clean replay, so an open PR stays "
-             "reviewable"),
-            ("install", "Install the result",
-             "validate the checkout and rescan the shell"),
+class TrackBranchDialog(Adw.Dialog):
+    """Explicitly select the two GitHub branches for a personal change."""
+
+    def __init__(self, window: CarryWindow, pl: core.Plugin):
+        super().__init__(title=f"Track a branch for {pl.id}", content_width=560, content_height=500)
+        self.window, self.pid = window, pl.id
+        saved = core.plugin_state(pl.id).get("tracked_branch") or {}
+        upstream_url = pl.remotes.get(pl.upstream_remote or "") or pl.upstream_candidate or ""
+        upstream = core.repo_key(upstream_url)
+        if upstream.startswith("github.com/"):
+            upstream = upstream[len("github.com/"):]
+        else:
+            upstream = ""
+        # A fork may be called origin when the real project is upstream.
+        fork_url = pl.remotes.get("fork", "")
+        if not fork_url and pl.upstream_remote != "origin":
+            fork_url = pl.remotes.get("origin", "")
+        fork = core.repo_key(fork_url)
+        fork = fork[len("github.com/"):] if fork.startswith("github.com/") else ""
+        base = (pl.upstream_ref or "").split("/", 1)[-1]
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_start=18,
+                      margin_end=18, margin_top=12, margin_bottom=12)
+        note = Gtk.Label(label="Choose the upstream branch and your GitHub branch. Sync updates your branch first, then installs it locally.", wrap=True, xalign=0)
+        box.append(note)
+        self.fields = {}
+        for key, title, default in (
+            ("upstream", "Upstream GitHub repository", upstream),
+            ("base", "Upstream branch", base),
+            ("head_repo", "Your GitHub repository", fork),
+            ("head", "Your GitHub branch", pl.branch or ""),
         ):
-            row = Adw.SwitchRow(title=title, subtitle=subtitle, active=want[key])
-            row.connect("notify::active", self.policy_toggled(key))
-            section.add_row(row)
-        branch = Adw.EntryRow(title="Publish under this branch name (blank = the current one)")
-        branch.set_text(want.get("branch") or "")
-        apply_btn = Gtk.Button(label="Set")
-        apply_btn.set_valign(Gtk.Align.CENTER)
-        apply_btn.connect("clicked", lambda *_: self.window.run(
-            "policy", lambda: core.set_policy(self.pid, branch=branch.get_text().strip())))
-        branch.add_suffix(apply_btn)
-        section.add_row(branch)
-        return section
+            row = Adw.EntryRow(title=title)
+            row.set_text(saved.get(key, default))
+            self.fields[key] = row
+            box.append(row)
+        self.error = Gtk.Label(wrap=True, xalign=0, visible=False)
+        self.error.add_css_class("error")
+        box.append(self.error)
+        actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=8)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.close())
+        save = Gtk.Button(label="Track branch")
+        save.add_css_class("suggested-action")
+        save.connect("clicked", self.on_save)
+        actions.append(cancel)
+        actions.append(save)
+        box.append(actions)
+        self.set_child(box)
+        self.suggested_login = None
+        self.last_fork_suggestion = None
+        if not self.fields["head_repo"].get_text().strip():
+            self.fields["upstream"].connect("changed", self.suggest_fork)
+            threading.Thread(target=self.load_github_login, daemon=True).start()
 
-    def policy_toggled(self, key: str):
-        def handler(row, _pspec) -> None:
-            if getattr(row, "writing", False):
-                return  # the refresh below rebuilds rows; don't echo that
-            row.writing = True
-            self.window.run("policy", lambda: core.set_policy(self.pid, **{key: row.get_active()}))
-            row.writing = False
-        return handler
+    def load_github_login(self):
+        login = prsync.github_login()
+        GLib.idle_add(self.on_github_login, login)
+
+    def on_github_login(self, login):
+        self.suggested_login = login
+        self.suggest_fork()
+        return False
+
+    def suggest_fork(self, *_):
+        current = self.fields["head_repo"].get_text().strip()
+        if not self.suggested_login or (current and current != self.last_fork_suggestion):
+            return
+        upstream = prsync.github_repository(self.fields["upstream"].get_text())
+        if upstream:
+            self.last_fork_suggestion = f"{self.suggested_login}/{upstream.split('/', 1)[1]}"
+            self.fields["head_repo"].set_text(self.last_fork_suggestion)
+
+    def on_save(self, *_):
+        values = {key: row.get_text().strip() for key, row in self.fields.items()}
+        result = prsync.set_tracked_branch(self.pid, **values)
+        if not result.ok:
+            self.error.set_text(result.message)
+            self.error.set_visible(True)
+            return
+        self.close()
+        self.window.toast(result.message)
+        self.window.refresh()
 
 
 class RepoDialog(Adw.Dialog):
@@ -646,7 +661,7 @@ class CarryApp(Adw.Application):
         Adw.AboutDialog(
             application_name="omacarry",
             developer_name="ric",
-            version="0.1",
+            version="0.1.0",
             comments=("Carry your own changes to Omarchy shell plugins across upstream updates: "
                       "rebase them onto the newest upstream commit, install the result, and hand "
                       "the plugin back to normal updates once your change is merged."),

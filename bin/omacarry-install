@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Install Om Carry's menu entry and optional post-update hook."""
+import argparse
+import os
+import subprocess
+from pathlib import Path
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--no-hook', action='store_true', help='install only the application launcher')
+args = parser.parse_args()
+root = Path(__file__).resolve().parent.parent
+launcher = root / 'bin' / 'omacarry'
+if not launcher.is_file():
+    parser.error(f'launcher not found: {launcher}')
+# Desktop Entry Exec quoting is not shell quoting. Escape reserved characters
+# inside a double-quoted argument and escape percent field codes.
+quoted = str(launcher).replace('%', '%%').replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$')
+applications = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share') / 'applications'
+applications.mkdir(parents=True, exist_ok=True)
+entry = applications / 'omacarry.desktop'
+entry.write_text('[Desktop Entry]\nType=Application\nName=Om Carry\n'
+                 'Comment=Keep Omarchy plugin changes current\n'
+                 f'Exec="{quoted}" gui\nIcon=system-software-update\n'
+                 'Terminal=false\nCategories=Settings;\n')
+print(f'Installed launcher: {entry}')
+if not args.no_hook:
+    subprocess.run([str(launcher), 'hook-install'], check=True)

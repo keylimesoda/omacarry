@@ -1,4 +1,5 @@
 #!/bin/sh
 # omacarry - carry local Omarchy plugin changes across upstream updates.
 here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$here" || exit 1
 PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m omacarry "$@"

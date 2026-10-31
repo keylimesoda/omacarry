@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import time
@@ -954,6 +955,8 @@ def deploy(plugin_id: str, rescan: bool = True) -> Result:
     if rescan:
         code, out, err = run_shell("shell", "rescanPlugins")
         details.append("shell rescanPlugins: " + ("ok" if code == 0 else f"failed - {err or out}"))
+        if code != 0:
+            return Result(False, "install", plugin_id, "shell rescan failed: " + (err or out), details=details)
 
     entry["installed"] = pl.head
     save_plugin_state(plugin_id, entry)
@@ -1079,7 +1082,7 @@ def install_hook(hook_file: str | None = None) -> Result:
             return Result(False, "hook", "-", f"launcher not found: {launcher}")
         generated = config_dir() / "post-update-omacarry.hook"
         generated.parent.mkdir(parents=True, exist_ok=True)
-        generated.write_text(HOOK_TEMPLATE.format(launcher=str(launcher), source=str(source)))
+        generated.write_text(HOOK_TEMPLATE.format(launcher=shlex.quote(str(launcher)), source=str(source)))
         generated.chmod(0o755)
         source = generated
     proc = subprocess.run(("omarchy", "hook", "install", "post-update", str(source)),
@@ -1142,38 +1145,8 @@ def carry(plugin_id: str) -> Result:
     """The one verb: bring my branch onto the newest upstream, then push and
     install it if that plugin's policy says so. The post-update pass, the window
     and the CLI all run this same thing."""
-    want = policy(plugin_id)
-    pl = inspect_plugin(plugin_id, plugin_state(plugin_id))
-    if pl.state == "stock":
-        return Result(True, "carry", plugin_id, "nothing of yours to carry", changed=False)
-    if pl.state == "ffable":
-        # Nothing of mine to carry: Omarchy's own updater is the right tool.
-        return normal_update(plugin_id)
-    res = rebaseline(plugin_id, force=want["carry_dirty"])
-    if not res.ok:
-        return Result(False, "carry", plugin_id, res.message,
-                      files=res.files, details=res.details, changed=res.changed)
-    if not res.changed:
-        return Result(True, "carry", plugin_id, res.message, details=res.details, changed=False)
-    steps = list(res.details)
-    if want["push"]:
-        pushed = push(plugin_id)
-        steps += [pushed.message] + (pushed.details or [])
-        if not pushed.ok:
-            return Result(False, "carry", plugin_id,
-                          f"updated, but the push failed: {pushed.message}",
-                          details=steps)
-    if want["install"]:
-        dep = deploy(plugin_id)
-        steps += dep.details
-        if not dep.ok:
-            return Result(False, "carry", plugin_id,
-                          f"updated, but the install failed: {dep.message}",
-                          files=dep.files, details=steps)
-        return Result(True, "carry", plugin_id, f"updated and installed: {dep.message}",
-                      details=steps)
-    return Result(True, "carry", plugin_id,
-                  f"updated, not installed (install is off): {res.message}", details=steps)
+    from .prsync import sync
+    return sync(plugin_id)
 
 
 def describe_action(pl: Plugin) -> tuple:
@@ -1274,38 +1247,25 @@ def auto_pass(notify=None) -> list[Result]:
     detached HEAD, an unrecorded upstream, a stopped rebase - is reported, never
     guessed at.
     """
+    from .prsync import sync
     results: list[Result] = []
     for pl in scan():
-        want = policy(pl.id)
-        # Decide against the newest upstream, not the last-fetched one: a remote
-        # tracking ref left over from an earlier run can make a plugin that has
-        # moved ahead look perfectly in sync, and then nothing ever updates.
-        fetch(pl.id)
-        pl = inspect_plugin(pl.id, plugin_state(pl.id))
-        if pl.state == "stock":
+        if not policy(pl.id)["auto"]:
             continue
-        if not want["auto"]:
-            results.append(Result(True, "auto", pl.id, "left alone: auto is off for this plugin"))
+        prior = plugin_state(pl.id).get("last_sync")
+        res = sync(pl.id)
+        if pl.state == "stock" and not res.ok and res.message.startswith("No open PR found"):
+            entry = plugin_state(pl.id)
+            # This is the normal state of a stock plugin, not a failed sync.
+            # Drop the noise from this pass while retaining a meaningful prior result.
+            if prior and not (not prior.get("ok") and
+                              prior.get("message", "").startswith("No open PR found")):
+                entry["last_sync"] = prior
+            else:
+                entry.pop("last_sync", None)
+            save_plugin_state(pl.id, entry)
             continue
-        if pl.state == "merged":
-            # Handing a plugin back to normal updates rewrites its remotes and
-            # deletes the carry branch: worth reporting, not worth doing alone.
-            results.append(Result(True, "auto", pl.id,
-                                  "your changes are upstream - run: omacarry resume "
-                                  f"{pl.id}, then omarchy plugin update {pl.id}"))
-            continue
-        if pl.state in ("detached", "no-upstream", "rebasing"):
-            results.append(Result(False, "auto", pl.id, pl.note))
-            continue
-        # carry() rehearses before touching the checkout, so a conflict here
-        # costs nothing and the failure says what needs a human.
-        res = carry(pl.id)
-        if res.ok:
-            results.append(Result(True, "auto", pl.id, res.message,
-                                  details=res.details, changed=res.changed))
-        else:
-            results.append(Result(False, "auto", pl.id, f"{res.message} - needs a human",
-                                  files=res.files, details=res.details, changed=res.changed))
+        results.append(res)
     if notify:
         for res in results:
             notify(res)
